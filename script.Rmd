@@ -1,0 +1,244 @@
+---
+title: "script"
+output: html_document
+date: "2024-08-26"
+---
+
+```{r Downloading and reading data}
+## search data here! https://ladsweb.modaps.eosdis.nasa.gov/search/
+library(sf)
+library(raster)
+library(dplyr)
+library(stringr)
+library(terra)
+
+## note: lk_bd is the border of the whole research area (Sri Lanka here). Put your own path here to generate your research area.
+lk_bd <- st_read("C:\\Users\\xiaomeng.wu\\Documents\\WFP File\\ICA Materials\\ShapeFiles/lk.shp")
+
+## LST data
+lst_list <- list()
+## note: hdf_files are the hdf files you downloaded from https://ladsweb.modaps.eosdis.nasa.gov/search/ for LST analysis. put your own path to the folder here. 
+hdf_files <- list.files("C:\\Users\\xiaomeng.wu\\OneDrive - World Food Programme\\Documents\\WFP File\\In-house survey\\LST Daily JAN23-AUG24", pattern = "\\.hdf$", full.names = TRUE)
+
+for (hdf_file in hdf_files) {
+  file_name <- basename(hdf_file)
+  file_name <- substr(file_name, 10, nchar(file_name)-4)
+  hdf_raster <- rast(hdf_file)
+  subdatasets <- names(hdf_raster)
+  layers <- lapply(hdf_raster[[grep("LST_Day_1km|LST_Night_1km", subdatasets)]], function(layer){
+    return(raster(layer))
+  })
+  ifelse(length(lst_list[[file_name]]) !=0, 
+         lst_list[[file_name]] <- append(lst_list[[file_name]], layers), 
+         lst_list[[file_name]] <- layers)
+  
+}
+
+## merging data on the same date
+lst_date <- unique(substr(names(lst_list), 1, 7))
+lst_comb <- list()
+## all data to be considered 
+for (date in lst_date) {
+  stack_list <- lst_list[grep(date, names(lst_list))] %>% unlist(recursive = FALSE)
+  print(date)
+  print(length(stack_list))
+  r <- reduce(stack_list, mosaic, fun = mean) %>%
+        projectRaster(crs=4326) %>%
+    crop(lk_bd) %>% mask(lk_bd)
+  lst_comb[[date]] <- r
+}
+
+
+
+## NDVI data
+ndvi_list <- list()
+## note: hdf_files are the hdf files you downloaded from https://ladsweb.modaps.eosdis.nasa.gov/search/ for NDVI analysis. put your own path to the folder here. 
+hdf_files <- list.files("C:\\Users\\xiaomeng.wu\\OneDrive - World Food Programme\\Documents\\WFP File\\In-house survey\\NDVI JAN23-AUG24", pattern = "\\.hdf$", full.names = TRUE)
+
+for (hdf_file in hdf_files) {
+  file_name <- basename(hdf_file)
+  file_name <- substr(file_name, 10, nchar(file_name)-22)
+  hdf_raster <- rast(hdf_file)
+  subdatasets <- names(hdf_raster)
+  layer <- hdf_raster[[grep("1 km 16 days NDVI", subdatasets)]] %>% raster()
+  ndvi_list[[file_name]] <- layer
+}
+
+ndvi_date <- unique(substr(names(ndvi_list), 1, 7))
+ndvi_comb <- list()
+## all data to be considered 
+for (date in ndvi_date) {
+  stack_list <- ndvi_list[grep(date, names(ndvi_list))]
+  print(date)
+  print(length(stack_list))
+  r <- reduce(stack_list, mosaic, fun = mean) %>% 
+        projectRaster(crs=4326) %>% 
+    crop(lk_bd) %>% mask(lk_bd)
+  ndvi_comb[[date]] <- r
+}
+
+
+
+## soil moisture
+## note: hdf_files are the hdf files you downloaded from https://ladsweb.modaps.eosdis.nasa.gov/search/ for soil moisture analysis. put your own path to the folder here. 
+sm_folder <- list.dirs("C:\\Users\\xiaomeng.wu\\OneDrive - World Food Programme\\Documents\\WFP File\\In-house survey\\5000005723936", recursive = FALSE)
+sm_files <- lapply(sm_folder, function(folder){
+  list.files(folder, full.names = TRUE)
+}) %>% unlist()
+sm_files <- sm_files[grep("Soil_Moisture", sm_files)]
+sm_list <- list()
+for (i in 1:length(sm_files)) {
+  file_name <- basename(sm_files[i]) 
+  names(sm_list)[i] <- file_name
+}
+sm_list_nopolar <- sm_list[!grepl( "Polar", names(sm_list))]
+sm_date <- names(sm_list)
+sm_date <- sm_date[!grepl("Polar", sm_date)]
+sm_date <- substr(sm_date, 16,23) %>% unique()
+sm_comb <- list()
+for (date in sm_date) {
+  stack_list <- sm_list_nopolar[grep(date, names(sm_list_nopolar))]
+  print(date)
+  print(length(stack_list))
+  r <- reduce(stack_list, mosaic, fun = mean)
+  sm_comb[[date]] <- r
+}
+
+## note: the lists, lst_comb, ndvi_comb, and sm_comb are prepared for the following steps. they should be list named by date "YYYYDDD". Check it before you go on. 
+```
+
+```{r extract to divisions}
+library(sf)
+library(raster)
+library(dplyr)
+
+## spatial objects
+## note: lk_dv are the vector file with all the small area units, and here we took divisions as the analysis unit. put your own path to the folder here. 
+lk_dv <- st_read("C:\\Users\\xiaomeng.wu\\OneDrive - World Food Programme\\Documents\\WFP File\\ICA Materials\\ShapeFiles/lka_adm3_Allindicators_census.shp")
+dv_list <- split(lk_dv, lk_dv$dsd_n_1)
+names(dv_list) <- lk_dv$dsd_n_1
+
+## extracting data
+## division_names is the vector of geometry of the administrations; attribute is the list of a certain attribute by date. 
+normalize <- function(v){
+  max_v <- max(v, na.rm = T)
+  min_v <- min(v, na.rm = T)
+  v_norm <- (v-min_v)/(max_v-min_v)
+  return(as.data.frame(v_norm))
+}
+
+## normalizing data
+reshape_list <- function(original_list) {
+  # Get all the unique dates from the row names of the data frames
+  all_dates <- unique(unlist(lapply(original_list, rownames)))
+  
+  # Initialize an empty list to store the reshaped data
+  reshaped_list <- list()
+  
+  # Iterate over each date
+  for (date in all_dates) {
+    # Initialize an empty data frame to store the values for the current date
+    df <- data.frame(Division = names(original_list), Value = numeric(length(original_list)))
+    
+    # Iterate over each division to extract the value for the current date
+    for (i in 1:length(original_list)) {
+      division <- names(original_list)[i]
+      df$Value[i] <- original_list[[division]][date, , drop = TRUE]
+    }
+    
+    # the data frame in the reshaped list, named by the date
+    reshaped_list[[date]] <- df
+  }
+  
+  return(reshaped_list)
+}
+##extract to ds, ds is the names of divisions
+extract_dv <- function(raster_list, ds){
+  test <- sapply(raster_list, function(raster_layer){
+  value <- raster::extract(raster_layer, ds, fun = mean, na.rm = T )
+} )%>% apply(FUN = normalize, MARGIN = 1)
+  names(test) <- ds$dsd_n_1
+  reshape_list(test)
+}
+## note: run these lines to generate the 3 lists of daily LST/NDVI/SM. In each sub-list named by date "YYYYDDD", there is a dataframe, with 2 columns and 331 (or as much as your analysis unit) rows, containing the LST/NDVI/SM value in each division on the exact date. 
+## this may take long time to run. 
+lst_dv_test <- extract_dv(lst_comb, lk_dv)
+ndvi_dv_test <- extract_dv(ndvi_comb, lk_dv)
+sm_dv_test <- extract_dv(sm_comb, lk_dv)
+```
+
+```{r get smadi (in use)}
+library(sf)
+library(dplyr)
+## function to get a data frame of SMADI on DS level
+  find_closest_date <- function(date, lst) {
+    lst_dates <- as.numeric(names(lst))
+    # Calculate differences and find the closest date
+    diffs <- abs(lst_dates - date)
+    closest_index <- which.min(diffs)
+    return(lst[[closest_index]])
+  }
+get_smadi <- function(date){
+  ##transform the date to the supported format
+    target_date <- as.numeric(format(as.Date(date), "%Y%j"))
+  ## the nearest date 
+  # Step 3: Extract the closest vectors
+    vec1 <- find_closest_date(target_date,lst_dv_test)
+    vec2 <- find_closest_date(target_date, ndvi_dv_test)
+    vec3 <- find_closest_date(target_date, sm_dv_test)
+  print(vec1)
+  print(vec2)
+  print(vec3)
+  # Step 4: Combine the vectors into a data frame
+  combined_df <- data.frame(lst = vec1$Value, ndvi = vec2$Value, sm = vec3$Value)
+  combined_df$smadi <- combined_df$lst/combined_df$ndvi * combined_df$sm 
+  # 
+  # # Step 5: Join the data frame with the spatial data
+  joined_df <- cbind(lk_dv[, 13], combined_df)
+
+  return(joined_df)
+}
+
+```
+
+
+```{r plot maps}
+library(ggplot2)
+library(ggsci)
+library(ggspatial)
+
+smadi_plot <- function(date, ifcsv = FALSE){
+  test <- get_smadi(date = date)
+  print("SMADI ready!")
+    ggplot(test)+
+  annotation_map_tile(zoom = 3)+
+  geom_sf(aes(fill = smadi))+
+  scale_fill_material("lime")+
+  theme_void()+
+  theme(legend.key.size = unit(3, "cm"),
+        legend.text = element_text(size=50),
+        legend.title = element_text(size=50),
+        legend.key.width = unit(1, "cm"),)+
+  annotation_scale(width_hint = 0.4,
+                     style = "ticks",
+                     pad_y = unit(0.3, "cm"), pad_x = unit(0.1, "cm"),
+                   height = unit(1, "cm"), line_width = 6,
+                   text_cex = 4,
+                    location= "br") +
+  annotation_north_arrow(location = "tr", which_north = "true",
+        pad_x = unit(0.25, "in"), pad_y = unit(0.2, "in"),
+        height = unit(5, "cm"), width = unit(5, "cm"),
+        style = north_arrow_fancy_orienteering)+
+  labs(fill = "SMADI")
+    ggsave(paste0("SMADI-", format(Sys.time(), "%y%m%d-%H%M%S"), ".png"))
+    print("Image saved!")
+ifelse(ifcsv, {
+  write.csv(as.data.frame(test)[,1:5],paste0("SMADI-", format(Sys.time(), "%y%m%d-%H%M%S"), ".csv") )
+  print("CSV saved!")
+}, 
+print("CSV not required!"))
+
+}
+## note: here you put the date "YYYY-MM-DD" you are interested in, and define "ifcsv = TRUE" if you want to get the exact values of LST, NDVI, SM and SMADI in format of ".csv". 
+smadi_plot(date = "2024-03-01", ifcsv = TRUE)
+```
